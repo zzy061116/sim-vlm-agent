@@ -1,0 +1,11 @@
+# 密钥不入库
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行产物（可随时重新生成，用 report.html / run.gif 做演示素材）
+runs/
+run.log
+run.err
