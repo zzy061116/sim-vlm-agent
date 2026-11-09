@@ -1,6 +1,9 @@
 # 密钥不入库
 .env
 
+# 个人备考资料，不公开
+docs/面试拷打手册.md
+
 # Python
 __pycache__/
 *.py[cod]
