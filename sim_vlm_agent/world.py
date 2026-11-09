@@ -286,6 +286,22 @@ class World:
         nx, ny = self._front_cell()
         return (not self.in_bounds(nx, ny)) or self.is_wall(nx, ny)
 
+    def _side_cell(self, side: int) -> tuple[int, int]:
+        """side=+1 右侧，side=-1 左侧：朝向的垂直方向偏转一格。"""
+        dx, dy = DIR_VEC[self.agent["dir"]]
+        sx, sy = -dy * side, dx * side
+        return self.agent["gx"] + sx, self.agent["gy"] + sy
+
+    def left_blocked(self) -> bool:
+        """左侧紧邻格是不是墙——对应真机的左向测距/红外。"""
+        nx, ny = self._side_cell(-1)
+        return (not self.in_bounds(nx, ny)) or self.is_wall(nx, ny)
+
+    def right_blocked(self) -> bool:
+        """右侧紧邻格是不是墙——对应真机的右向测距/红外。"""
+        nx, ny = self._side_cell(1)
+        return (not self.in_bounds(nx, ny)) or self.is_wall(nx, ny)
+
     def distance_band(self) -> str:
         """粗粒度距离档位，视觉上本来也只能估到这个精度。"""
         distance = self.manhattan_to_target()
@@ -355,6 +371,8 @@ class World:
             "agent": dict(self.agent),
             "agent_region": self.region_of(self.agent["gx"], self.agent["gy"]),
             "front_blocked": self.front_blocked(),
+            "left_blocked": self.left_blocked(),
+            "right_blocked": self.right_blocked(),
             "target": {
                 "color": self.target.color,
                 "shape": self.target.shape,

@@ -115,6 +115,8 @@ class FusedView:
     bearing: str
     distance_band: str
     front_blocked: bool
+    left_blocked: bool
+    right_blocked: bool
     adjacent: bool
     target_region: str
     target_visible: bool
@@ -124,13 +126,16 @@ class FusedView:
             "target_bearing": self.bearing,
             "target_distance": self.distance_band,
             "front_blocked": self.front_blocked,
+            "left_blocked": self.left_blocked,
+            "right_blocked": self.right_blocked,
             "already_beside_target": self.adjacent,
             "target_region": self.target_region,
             "target_visible": self.target_visible,
         }
 
     def brief(self) -> str:
-        return (f"目标={self.bearing}/{self.distance_band} 前方堵={self.front_blocked}"
+        return (f"目标={self.bearing}/{self.distance_band} 堵(前/左/右)="
+                f"{self.front_blocked}/{self.left_blocked}/{self.right_blocked}"
                 f" 画面区={self.target_region}")
 
 
@@ -172,6 +177,8 @@ def fuse(obs: Observation, truth: dict[str, Any]) -> FusedView:
         bearing=bearing,
         distance_band=truth["target"]["distance_band"],
         front_blocked=truth["front_blocked"],
+        left_blocked=truth["left_blocked"],
+        right_blocked=truth["right_blocked"],
         adjacent=truth["target"]["adjacent"],
         target_region=obs.target_region,
         target_visible=obs.target_visible,

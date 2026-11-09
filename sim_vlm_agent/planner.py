@@ -76,13 +76,22 @@ SYSTEM_PROMPT = f"""你是一台在网格房间里行动的小机器人的决策
 | already_beside_target 为 true | grab_object |
 | target_bearing 是 here（目标就在身边，方向分辨不出来），且 front_blocked 为 false | move_forward |
 | target_bearing 是 front / front-left / front-right，且 front_blocked 为 false | move_forward |
-| front_blocked 为 true | 转向（往目标所在的那一侧转） |
+| front_blocked 为 true，且 left_blocked 与 right_blocked 恰有一个为 false | 朝未堵的那一侧转 |
+| front_blocked 为 true，且两侧都不堵 | 朝目标所在的那一侧转 |
+| front_blocked 为 true，且两侧都堵（死角） | 任意转向一次（连转两次后自然出现可前进方向） |
+| target_bearing 是 back / back-left / back-right（目标在背后），且 front_blocked 为 false | move_forward（原地转向对不准背后的目标，先前进换格，方位会自己变化） |
 | target_bearing 是 left | turn_left |
 | target_bearing 是 right | turn_right |
-| target_bearing 是 back-left | turn_left |
-| target_bearing 是 back-right | turn_right |
-| target_bearing 是 back | 任意转向一次 |
 | 上面都不成立，且连续转向已 ≥ 2 次 | move_forward |
+
+【绕路规则，务必理解】
+- 目标在某个方向，不代表那个方向能直接走：目标方向的邻格可能被墙挡住。
+  这时正确的做法是绕路：先朝可走的方向前进，等目标重新回到 front 半球再对准。
+- 绕路时 target_bearing 会暂时变差（甚至变成 back），这是正常现象，
+  不要因为方位变差就立刻转回去——那只会回到原地。
+- left_blocked / right_blocked 是侧向传感的实时读数，和 front_blocked 一样每步都会给出；
+  【撞墙记忆】里列出的是历史撞过墙的方向，必定可信，优先级高于猜测。
+- 三面被堵只剩一条路时，唯一正确的动作就是朝那条路走，哪怕它暂时远离目标。
 
 补充说明：
 - 斜前方（front-left / front-right）不需要先把朝向转正，直接前进一格就行，
@@ -155,9 +164,10 @@ class Planner:
         self_state: dict[str, Any],
         verification: dict[str, Any],
         history: list[dict[str, Any]],
+        memory: dict[str, Any] | None = None,
     ) -> Plan:
         started = time.time()
-        user_prompt = self._build_prompt(obs, fused, self_state, verification, history)
+        user_prompt = self._build_prompt(obs, fused, self_state, verification, history, memory)
 
         payload = {
             "model": self.cfg.llm_model,
@@ -212,15 +222,17 @@ class Planner:
 
         这几条判据在代码里就能算死，没必要让模型猜，也没必要等它执行失败再救：
         1. 已经站到目标旁边 → 该抓就抓，抓取只跟距离有关，跟朝向无关。
-        2. 前方就是墙 → 前进必然失败，先把这一步改成转向（绕路），不要浪费一轮；
-           此时也不再纠正转向方向：目标是绕过去，不是对准，硬掰只会来回抖。
+        2. 前方就是墙 → 前进必然失败，改成转向绕行。转向侧不再写死：
+           现在有 left_blocked/right_blocked 侧向传感和目标方位作依据，
+           优先朝「未堵 + 更靠近目标那一侧」转；两侧都堵（死角）时任意一侧。
         3. 目标在前半球（含斜前方）且前方无墙 → 接近策略就是往前，不是原地转。
            斜前方 45 度用 90 度转向永远对不准，转过去就跑到另一侧，会来回震荡。
         4. 已经进入两格内（near）且目标不在背后 → 同样往前挪。九宫格在这个尺度上
            已经没有分辨力，再让模型依据方位去转向只会原地踏步，不如先缩短距离。
 
-        注意这里刻意「只拦不给方向」：能判死的只有前进/抓取这两个语义，
-        转向方向留给模型，免得代码和模型互相纠正，把机器人卡在原地打转。
+        第 2 条从「只拦不给方向」升级为「有依据地给方向」：绕行的目的是绕过去，
+        目标方位与侧向传感都是可信观察，按它们选侧是有信息依据的纠偏，不是瞎掰；
+        与决策表的绕路规则保持同一逻辑，代码与模型不会互相纠正打转。
         """
         if not plan.ok:
             return plan
@@ -232,9 +244,32 @@ class Planner:
             return plan
 
         if fused.front_blocked:
+            left_open, right_open = not fused.left_blocked, not fused.right_blocked
+            target_left = fused.bearing in ("front-left", "left", "back-left")
+            target_right = fused.bearing in ("front-right", "right", "back-right")
+            # 传感器依据下的选侧：优先「未堵 + 更靠近目标」的那一侧
+            if left_open and (not right_open or target_left):
+                desired = "turn_left"
+                why = "左侧可走且更靠近目标"
+            elif right_open and (not left_open or target_right):
+                desired = "turn_right"
+                why = "右侧可走且更靠近目标"
+            elif left_open:
+                desired = "turn_left"
+                why = "两侧均可走但无目标方位信息，默认左转"
+            else:
+                desired = "turn_left"
+                why = "前方与两侧都堵（死角），任意转向找出路"
             if plan.action == "move_forward":
-                plan.guard = "前方贴墙，前进必然失败，改为左转绕行"
-                plan.action = "turn_left"
+                plan.guard = f"前方贴墙，前进必然失败，{why}，改为{desired}"
+                plan.action = desired
+            elif plan.action in ("turn_left", "turn_right") and plan.action != desired:
+                # 模型自己转向但选错了侧（实例：eval_s11 step22，目标在右、
+                # 左右都未堵，模型却左转走进死角）。两侧通堵是传感器真值，
+                # 目标方位是校验过的观察——按它们纠偏是有依据的确定性语义，
+                # 与「只拦不给方向」防的「无依据互相纠正」不是一回事。
+                plan.guard = f"前方贴墙，模型转向侧与传感器/目标方位矛盾：{why}，纠正为{desired}"
+                plan.action = desired
             return plan
 
         front_hemi = fused.bearing in ("front", "front-left", "front-right", "here")
@@ -245,7 +280,50 @@ class Planner:
             if plan.action != "move_forward":
                 plan.guard = f"目标在{fused.bearing}（{fused.distance_band}）且前方无墙，纠正为前进"
                 plan.action = "move_forward"
+            return plan
+
+        # 5. 目标在背后且前方无墙 → 前进换格，不许原地转向。实测 glm-4-flash 对
+        #    决策表的这一行遵守率差（2026-11-07 s3 轨迹：背向目标时连续转向 3 步
+        #    触发打转接管）：90 度转向只会让背后目标挪一个方位档，仍然对不准；
+        #    前进一格后方位自然变化，且前方无墙保证这一步必不失败。
+        if fused.bearing in ("back", "back-left", "back-right") and plan.action in ("turn_left", "turn_right"):
+            plan.guard = f"目标在{fused.bearing}且前方无墙，原地转向对不准，先前进换格"
+            plan.action = "move_forward"
         return plan
+
+    @staticmethod
+    def _memory_text(self_state: dict[str, Any], memory: dict[str, Any] | None) -> str:
+        """把撞墙记忆换算成「相对当前朝向」的说法，与决策表口径一致。"""
+        if not memory:
+            return ""
+        gx, gy = self_state["agent"]["gx"], self_state["agent"]["gy"]
+        facing = self_state["agent"]["dir"]
+        order = ["N", "E", "S", "W"]
+        rel_map = {facing: "正前", order[(order.index(facing) + 3) % 4]: "左方",
+                   order[(order.index(facing) + 1) % 4]: "右方", order[(order.index(facing) + 2) % 4]: "后方"}
+        here = sorted({rel_map[d] for (bx, by, d) in memory.get("known_blocked", [])
+                       if (bx, by) == (gx, gy)},
+                      key=["正前", "左方", "右方", "后方"].index)
+        lines = []
+        if here:
+            lines.append(f"从当前位置出发，以下方向曾真实撞过墙（必定可信）：{'、'.join(here)}")
+        traj = memory.get("pos_history") or []
+        if len(traj) >= 2:
+            lines.append("最近走过的位置序列（x,y）：" + " -> ".join(f"({x},{y})" for x, y in traj))
+        still = memory.get("still")
+        if still:
+            lines.append(f"已经连续 {still} 步位置未变——如果连续两次出现，说明你正在原地打转，"
+                         "必须换一个方向真正挪一格")
+        traj = memory.get("pos_history") or []
+        seen_cells: dict[tuple[int, int], int] = {}
+        for cell in traj:
+            seen_cells[cell] = seen_cells.get(cell, 0) + 1
+        repeated = {c for c, n in seen_cells.items() if n >= 3}
+        if repeated:
+            cells = "、".join(f"({x},{y})" for x, y in sorted(repeated))
+            lines.append(f"警告：最近轨迹里 {cells} 已被走过 3 次以上——你正在绕圈，"
+                         "必须选择一条没走过的方向走出去，不要重复刚走过的格子")
+        return ("\n【撞墙记忆与运动轨迹】\n" + "\n".join(lines) + "\n") if lines else ""
 
     @staticmethod
     def _build_prompt(
@@ -254,6 +332,7 @@ class Planner:
         self_state: dict[str, Any],
         verification: dict[str, Any],
         history: list[dict[str, Any]],
+        memory: dict[str, Any] | None = None,
     ) -> str:
         turns = _consecutive_turns(history)
 
@@ -274,6 +353,7 @@ class Planner:
             f"当前位置区域：{self_state['agent_region']}\n"
             f"已经连续转向：{turns} 次\n\n"
             f"【这一步的视觉观察】\n{json.dumps(view, ensure_ascii=False, indent=2)}\n\n"
+            f"{Planner._memory_text(self_state, memory)}"
             f"【观察可信度校验】\n{json.dumps(check, ensure_ascii=False)}\n"
             f"说明：consistent 为 false 表示这张图的描述与程序侧真值对不上，需要换个视角重新看。\n\n"
             f"【最近动作】\n{_history_text(history)}\n\n"

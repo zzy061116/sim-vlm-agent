@@ -24,6 +24,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default="run", help="本次运行的标签，用于轨迹目录名")
     parser.add_argument("--seed", type=int, default=None,
                         help="世界随机种子：复现某次运行的布局；缺省每次随机生成")
+    parser.add_argument("--stuck", choices=("state", "old"), default="state",
+                        help="打转检测判据：state=状态重复+可执行前进放行（默认）；"
+                             "old=连续 3 步位置未变（旧版，供对照）")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -42,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"接口地址  : {cfg.base_url}")
         print(f"密钥      : {cfg.masked_key()}")
     print(f"最大轮次  : {cfg.max_step}")
+    print(f"打转检测  : {args.stuck}")
     print("=" * 62)
 
     loop = AgentLoop(
@@ -50,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         delay=args.delay if args.render else 0.0,
         label=args.label,
         seed=args.seed,
+        stuck_detector=args.stuck,
     )
     layout = loop.world.layout()
     print(f"世界种子  : {layout['seed']}")
